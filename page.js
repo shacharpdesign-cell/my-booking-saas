@@ -1,90 +1,111 @@
 'use client';
-import { useEffect, useState, use } from 'react';
+import React, { useEffect, useState } from 'react';
 import { supabase } from '../../lib/supabase';
-import { sendWhatsAppNotification } from '../../lib/notification';
+import CrmTab from './CrmTab';
+import SettingsTab from './SettingsTab';
 
-export default function BusinessProfile({ params }) {
-  const resolvedParams = use(params); const slug = resolvedParams?.slug;
-  const [business, setBusiness] = useState(null); const [services, setServices] = useState([]); const [loading, setLoading] = useState(true);
-  const [selectedService, setSelectedService] = useState(null); const [selectedDate, setSelectedDate] = useState('');
-  const [availableSlots, setAvailableSlots] = useState([]); const [selectedTime, setSelectedTime] = useState('');
-  const [customerName, setCustomerName] = useState(''); const [customerPhone, setCustomerPhone] = useState('');
-  const [bookingLoading, setBookingLoading] = useState(false); const [bookingSuccess, setBookingSuccess] = useState(false);
-
-  useEffect(() => {
-    if (!slug) return;
-    async function load() {
-      const { data: p } = await supabase.from('profiles').select('*').eq('slug', slug.toLowerCase().trim()).single();
-      if (!p) return setLoading(false); setBusiness(p);
-      const { data: s } = await supabase.from('services').select('*').eq('profile_id', p.id);
-      if (s) setServices(s); setLoading(false);
-    }
-    load();
-  }, [slug]);
+export default function Dashboard() {
+  const [tab, setTab] = useState('cal'); const [userId, setUserId] = useState(null);
+  const [appointments, setAppointments] = useState([]); const [loading, setLoading] = useState(true);
+  const [businessName, setBusinessName] = useState('המספרה של דני'); const [weeklyHours, setWeeklyHours] = useState({});
+  const [btnLoading, setBtnLoading] = useState(false); const [weekOffset, setWeekOffset] = useState(0);
 
   useEffect(() => {
-    if (!selectedDate || !business || !selectedService) return;
-    async function getSlots() {
-      const d = new Date(selectedDate); const hours = business.weekly_hours || {};
-      const conf = hours[d.getDay().toString()] || { is_open: true, start: '09:00', end: '17:00' };
-      if (!conf.is_open) { setAvailableSlots([]); return; }
-      const slots = [];
-      for (let h = parseInt(conf.start); h < parseInt(conf.end); h++) { slots.push(`${h.toString().padStart(2, '0')}:00`, `${h.toString().padStart(2, '0')}:30`); }
-      const { data: ex } = await supabase.from('appointments').select('start_time').eq('profile_id', business.id).gte('start_time', `${selectedDate}T00:00:00Z`).lte('start_time', `${selectedDate}T23:59:59Z`);
-      const taken = ex?.map(a => new Date(a.start_time).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })) || [];
-      setAvailableSlots(slots.filter(t => !taken.includes(t)));
+    async function checkUser() {
+      const { data: { user } } = await supabase.auth.getUser();
+      setUserId(user ? user.id : '11111111-1111-1111-1111-111111111111');
     }
-    getSlots();
-  }, [selectedDate, business, selectedService]);
+    checkUser();
+  }, []);
 
-  const handleBook = async (e) => {
-    e.preventDefault(); if (!selectedTime || !customerName || !customerPhone) return; setBookingLoading(true);
-    const start = new Date(`${selectedDate}T${selectedTime}:00Z`);
-    const { error } = await supabase.from('appointments').insert([{ profile_id: business.id, service_id: selectedService.id, customer_name: customerName, customer_phone: customerPhone, start_time: start.toISOString(), end_time: new Date(start.getTime() + selectedService.duration_minutes * 60000).toISOString() }]);
-    setBookingLoading(false);
-    if (!error) { setBookingSuccess(true); await sendWhatsAppNotification(customerPhone, `התור שלך ב-${business.business_name} נקבע ל-${selectedDate} ב-${selectedTime}! 🎉`); }
-    else if (error.code === '23505') { alert('⚠️ השעה נתפסה.'); setSelectedTime(''); }
+  useEffect(() => {
+    if (!userId) return;
+    async function loadData() {
+      const { data: p } = await supabase.from('profiles').select('business_name, weekly_hours').eq('id', userId).single();
+      if (p) { if (p.business_name) setBusinessName(p.business_name); if (p.weekly_hours) setWeeklyHours(p.weekly_hours); }
+      if (!p || !p.weekly_hours) {
+        setWeeklyHours({"0":{"is_open":true,"start":"09:00","end":"17:00"},"1":{"is_open":true,"start":"09:00","end":"17:00"},"2":{"is_open":true,"start":"09:00","end":"17:00"},"3":{"is_open":true,"start":"09:00","end":"17:00"},"4":{"is_open":true,"start":"09:00","end":"17:00"}});
+      }
+      const { data: a } = await supabase.from('appointments').select('id, customer_name, customer_phone, start_time, status, services(name, price)').eq('profile_id', userId).order('start_time', { ascending: true });
+      if (a) setAppointments(a); setLoading(false);
+    }
+    loadData();
+  }, [userId]);
+
+  const handleStatus = async (id, newStatus) => {
+    const { error } = await supabase.from('appointments').update({ status: newStatus }).eq('id', id);
+    if (!error && userId) {
+      const { data: a } = await supabase.from('appointments').select('id, customer_name, customer_phone, start_time, status, services(name, price)').eq('profile_id', userId).order('start_time', { ascending: true });
+      if (a) setAppointments(a);
+    }
   };
 
-  if (loading) return <div className="flex h-screen items-center justify-center text-stone-900 bg-neutral-50 font-sans text-sm font-medium">טוען...</div>;
-  if (!business) return <div className="flex h-screen items-center justify-center text-stone-400 font-medium bg-neutral-50">העסק לא נמצא</div>;
+  const getWeekRange = () => {
+    const current = new Date(); const distance = current.getDay();
+    const sun = new Date(current.setDate(current.getDate() - distance + (weekOffset * 7))); sun.setHours(0,0,0,0);
+    const sat = new Date(sun); sat.setDate(sun.getDate() + 6); sat.setHours(23,59,59,999);
+    return { sun, sat };
+  };
+
+  if (loading) return <div className="flex h-screen items-center justify-center font-bold text-neutral-900 bg-neutral-50 text-sm tracking-wide">טוען לוח ניהול פרימיום...</div>;
+  const { sun, sat } = getWeekRange();
+  const filteredApps = appointments.filter(app => { const d = new Date(app.start_time); return d >= sun && d <= sat; });
 
   return (
-    <div className="min-h-screen bg-neutral-50 py-10 px-4 text-right antialiased font-sans" dir="rtl">
-      <div className="max-w-md mx-auto bg-white rounded-[2.5rem] shadow-2xl overflow-hidden border border-neutral-200/60">
-        <div className="bg-neutral-900 text-white pt-12 pb-8 text-center px-6 relative">
-          <div className="absolute top-4 right-4 bg-white/10 text-white/90 text-[10px] font-bold tracking-widest px-3 py-1 rounded-full backdrop-blur-md">● ONLINE BOOKING</div>
-          <div className="w-16 h-16 bg-stone-800 rounded-2xl mx-auto mb-4 flex items-center justify-center border border-white/10 shadow-lg text-white font-mono text-xl font-bold">{business.business_name.substring(0, 2).toUpperCase()}</div>
-          <h1 className="text-2xl font-bold text-white mb-1.5">{business.business_name}</h1>
-          <p className="text-neutral-400 text-xs font-normal">קביעת תור פרימיום מהירה בנייד</p>
-        </div>
-        {business.gallery_urls && business.gallery_urls.length > 0 && (
-          <div className="p-4 border-b border-neutral-100 bg-white">
-            <span className="text-[10px] font-bold text-neutral-400 block mb-2 tracking-wider">📸 גלריית עבודות:</span>
-            <div className="grid grid-cols-3 gap-2">{business.gallery_urls.map((url, i) => (<div key={i} className="aspect-square rounded-xl overflow-hidden bg-neutral-100 border shadow-sm"><img src={url} alt="גלריה" className="w-full h-full object-cover" /></div>))}</div>
+    <div className="min-h-screen bg-neutral-50 p-4 md:p-8 text-right antialiased font-sans" dir="rtl">
+      <div className="max-w-4xl mx-auto">
+        <div className="bg-white rounded-[2rem] shadow-xl p-6 mb-6 flex flex-col md:flex-row justify-between items-center gap-4 border border-neutral-200/60">
+          <div className="text-center md:text-right">
+            <h1 className="text-xl font-black text-neutral-900">{businessName}</h1>
+            <p className="text-neutral-400 text-[11px] font-medium tracking-wide mt-0.5">מערכת ניהול וקשרי לקוחות פרימיום</p>
           </div>
-        )}
-        <div className="p-4 bg-neutral-50 border-b border-neutral-100 px-6">
-          <a href={`https://waze.com{encodeURIComponent(business.address || 'תל אביב')}&navigate=yes`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 group"><div className="w-8 h-8 bg-neutral-900 text-white rounded-xl flex items-center justify-center text-xs shadow-md">📍</div><div className="text-xs"><span className="font-bold text-neutral-900 block mb-0.5">מיקום (לחצי לניווט ב-Waze):</span><span className="text-neutral-500 underline decoration-neutral-300">{business.address || 'דיזנגוף 120, תל אביב'}</span></div></a>
+          <div className="flex bg-neutral-100 p-1 rounded-xl w-full md:w-auto text-center">
+            <button onClick={() => setTab('cal')} className={`flex-1 md:flex-none px-4 py-2 text-xs font-bold rounded-lg transition-all ${tab === 'cal' ? 'bg-white text-neutral-900 shadow-md' : 'text-neutral-500'}`}>📅 יומן</button>
+            <button onClick={() => setTab('crm')} className={`flex-1 md:flex-none px-4 py-2 text-xs font-bold rounded-lg transition-all ${tab === 'crm' ? 'bg-white text-neutral-900 shadow-md' : 'text-neutral-500'}`}>👥 לקוחות</button>
+            <button onClick={() => setTab('settings')} className={`flex-1 md:flex-none px-4 py-2 text-xs font-bold rounded-lg transition-all ${tab === 'settings' ? 'bg-white text-neutral-900 shadow-md' : 'text-neutral-500'}`}>⚙️ הגדרות</button>
+          </div>
         </div>
-        <div className="p-6">
-          {bookingSuccess ? (
-            <div className="text-center py-8"><div className="w-14 h-14 bg-neutral-900 text-white text-lg rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg">✓</div><h2 className="text-xl font-bold text-neutral-900 mb-1.5">התור נקבע בהצלחה</h2><p className="text-neutral-500 text-xs mb-6">פרטי התור נשלחו אלייך כעת ב-WhatsApp.</p><button onClick={() => { setBookingSuccess(false); setSelectedService(null); }} className="w-full bg-neutral-900 text-white text-xs font-bold py-3.5 rounded-xl">שריון תור חדש</button></div>
-          ) : !selectedService ? (
-            <div className="space-y-3.5"><h2 className="font-bold text-neutral-900 text-sm tracking-wide mb-3">⚡ 1. בחרי טיפול:</h2>
-              {services.map(s => (<div key={s.id} onClick={() => setSelectedService(s)} className="border border-neutral-100 rounded-2xl p-4 flex justify-between items-center cursor-pointer bg-neutral-50/50 hover:bg-white hover:border-neutral-900 hover:shadow-xl transition-all duration-300"><div><h3 className="font-bold text-neutral-900 text-sm">{s.name}</h3><p className="text-neutral-400 text-[11px] mt-0.5">⏱️ {s.duration_minutes} דקות</p></div><span className="font-bold text-neutral-950 text-lg block">₪{s.price}</span></div>))}
+
+        {tab === 'cal' ? (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between bg-white rounded-2xl p-4 shadow-md border border-neutral-100">
+              <button onClick={() => setWeekOffset(weekOffset - 1)} className="text-[11px] bg-neutral-50 border font-bold px-3 py-2 rounded-xl text-neutral-700">הקודם ➔</button>
+              <div className="text-center">
+                <span className="text-xs font-bold text-neutral-900 block">{weekOffset === 0 ? '📅 השבוע הנוכחי' : `שבוע שנקבע (${weekOffset > 0 ? '+' : ''}${weekOffset})`}</span>
+                <span className="text-[10px] text-neutral-400 font-mono mt-0.5 block" dir="ltr">{sun.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })} - {sat.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })}</span>
+              </div>
+              <button onClick={() => setWeekOffset(weekOffset + 1)} className="text-[11px] bg-neutral-50 border font-bold px-3 py-2 rounded-xl text-neutral-700">⬅ הבא</button>
             </div>
-          ) : (
-            <div><button onClick={() => { setSelectedService(null); setSelectedDate(''); }} className="text-[11px] font-bold text-neutral-500 bg-neutral-100 px-3 py-1.5 rounded-lg mb-5">← חזרה</button><div className="bg-neutral-50 rounded-2xl p-4 mb-5 border border-neutral-100"><span className="text-[10px] text-neutral-400 block font-bold">השירות:</span><span className="font-bold text-neutral-800 text-sm">{selectedService.name}</span><span className="text-neutral-900 font-bold text-sm float-left">₪{selectedService.price}</span></div>
-              <form onSubmit={handleBook} className="space-y-5">
-                <div><label className="block text-xs font-bold text-neutral-700 mb-1.5">📅 2. בחר תאריך:</label><input type="date" required min={new Date().toISOString().split('T')[0]} value={selectedDate} onChange={(e) => { setSelectedDate(e.target.value); setSelectedTime(''); }} className="w-full border border-neutral-200 rounded-xl p-3 bg-neutral-50/50 text-xs font-bold" /></div>
-                {selectedDate && availableSlots.length === 0 && <p className="text-xs text-rose-500 font-bold text-center py-4 bg-rose-50 rounded-xl">❌ אופס! העסק סגור או שאין שעות פנויות ביום זה.</p>}
-                {selectedDate && availableSlots.length > 0 && (<div><label className="block text-xs font-bold text-neutral-700 mb-2">⏰ 3. בחר שעה:</label><div className="grid grid-cols-4 gap-2">{availableSlots.map(t => <button type="button" key={t} onClick={() => setSelectedTime(t)} className={`p-2.5 text-xs font-bold rounded-xl border text-center transition-all ${selectedTime === t ? 'bg-neutral-900 text-white' : 'bg-white text-slate-700'}`}>{t}</button>)}</div></div>)}
-                {selectedTime && (<div className="space-y-3.5 pt-4 border-t border-neutral-100"><input type="text" required value={customerName} onChange={e => setCustomerName(e.target.value)} className="w-full border border-neutral-200 rounded-xl p-3 text-xs focus:outline-neutral-900" placeholder="שם מלא" /><input type="tel" required value={customerPhone} onChange={e => setCustomerPhone(e.target.value)} className="w-full border border-neutral-200 rounded-xl p-3 text-xs text-left" dir="ltr" placeholder="מספר נייד" /><button type="submit" disabled={bookingLoading} className="w-full bg-neutral-900 text-white font-bold py-3.5 rounded-xl text-xs">{bookingLoading ? 'משריין...' : '✓ קבע תור'}</button></div>)}
-              </form>
-            </div>
-          )}
-        </div>
+            {filteredApps.length === 0 ? <div className="p-12 text-center text-neutral-400 font-medium bg-white rounded-2xl border">אין תורים רשומים לשבוע זה.</div> : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {filteredApps.map((app) => {
+                  const d = new Date(app.start_time); const s = app.services; const isB = app.customer_name.includes('זמן חסום');
+                  return (
+                    <div key={app.id} className={`bg-white rounded-2xl p-4 shadow-md border border-neutral-100 flex flex-col justify-between gap-3 transition-all ${isB ? 'bg-rose-50/20 border-rose-100' : ''}`}>
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <span className="text-[11px] font-mono font-bold text-neutral-400 block" dir="ltr">{d.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })} | {d.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })}</span>
+                          <h3 className="font-bold text-neutral-900 text-sm mt-0.5">{app.customer_name}</h3>
+                          {!isB && <span className="text-[11px] text-neutral-500 block mt-0.5 font-medium" dir="ltr">{app.customer_phone}</span>}
+                        </div>
+                        <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${app.status === 'completed' ? 'bg-green-50 text-green-700' : app.status === 'noshow' ? 'bg-rose-50 text-rose-700' : 'bg-neutral-100 text-neutral-700'}`}>{isB ? '🔓 חסום' : app.status === 'completed' ? '✓ הושלם' : app.status === 'noshow' ? '❌ הברזה' : '⏳ קבוע'}</span>
+                      </div>
+                      <div className="flex justify-between items-center border-t border-neutral-50 pt-3">
+                        <span className="text-xs font-bold text-neutral-800">{s?.name || 'טיפול כללי'} <span className="text-neutral-400 font-normal">(₪{s?.price || 0})</span></span>
+                        <div className="flex gap-2">
+                          {app.status === 'scheduled' && !isB && (
+                            <><button onClick={() => handleStatus(app.id, 'completed')} className="text-[10px] bg-neutral-900 text-white font-bold px-2.5 py-1.5 rounded-lg">בוצע</button>
+                              <button onClick={() => handleStatus(app.id, 'noshow')} className="text-[10px] border border-neutral-200 text-rose-600 font-bold px-2.5 py-1.5 rounded-lg">הבריז</button></>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ) : tab === 'crm' ? ( <CrmTab appointments={appointments} /> ) : ( <SettingsTab weeklyHours={weeklyHours} updateDaySetting={updateDaySetting} handleSaveSettings={handleSaveSettings} btnLoading={btnLoading} /> )}
       </div>
     </div>
   );
