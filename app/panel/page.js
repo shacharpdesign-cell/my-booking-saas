@@ -93,7 +93,7 @@ export default function OwnerPanel() {
           clearData();
           setLoading(false);
           router.replace('/');
-        } else if (event === 'SIGNED_IN' && ownerId && session.user.id !== ownerId) {
+        } else if (event === 'SIGNED_IN' && session.user.id !== ownerId) {
           ++request;
           ownerId = null;
           clearData();
