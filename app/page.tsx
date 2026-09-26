@@ -1,7 +1,7 @@
 'use client';
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
-import { supabase } from '../lib/supabase';
+import { getSupabase } from '../lib/supabase';
 
 export default function Home() {
   const router = useRouter(); const [isLogin, setIsLogin] = useState(true);
@@ -9,9 +9,10 @@ export default function Home() {
   const [businessName, setBusinessName] = useState(''); const [slug, setSlug] = useState('');
   const [loading, setLoading] = useState(false); const [msg, setMsg] = useState({ type: '', text: '' });
 
-  const handleAuth = async (e) => {
+  const handleAuth = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault(); setLoading(true); setMsg({ type: '', text: '' });
     try {
+      const supabase = getSupabase();
       if (isLogin) {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
@@ -26,7 +27,7 @@ export default function Home() {
         setMsg({ type: 's', text: 'הסטודיו נרשם בהצלחה! מעביר אותך להתחברות...' });
         setTimeout(() => { setIsLogin(true); setBusinessName(''); setSlug(''); }, 2000);
       }
-    } catch (err) { setMsg({ type: 'e', text: err.message || 'אופס! משהו השתבש.' }); } finally { setLoading(false); }
+    } catch (err) { setMsg({ type: 'e', text: err instanceof Error ? err.message : 'אופס! משהו השתבש.' }); } finally { setLoading(false); }
   };
 
   return (

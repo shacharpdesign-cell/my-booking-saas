@@ -4,7 +4,15 @@ import React, { useState } from 'react';
 const DAYS_NAMES = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
 const HOURS_LIST = ['07:00', '08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00', '21:00'];
 
-export default function SettingsTab({ weeklyHours, updateDaySetting, handleSaveSettings, btnLoading }: any) {
+type DaySetting = { is_open: boolean; start: string; end: string };
+type SettingsProps = {
+  weeklyHours: Record<string, DaySetting | undefined>;
+  updateDaySetting: <K extends keyof DaySetting>(day: string, field: K, value: DaySetting[K]) => void;
+  handleSaveSettings: React.FormEventHandler<HTMLFormElement>;
+  btnLoading: boolean;
+};
+
+export default function SettingsTab({ weeklyHours, updateDaySetting, handleSaveSettings, btnLoading }: SettingsProps) {
   const [imgUrl, setImgUrl] = useState('');
   return (
     <div className="space-y-6 max-w-xl mx-auto text-right" dir="rtl">

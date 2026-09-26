@@ -1,91 +1,189 @@
 'use client';
-import { useEffect, useState, use } from 'react';
-import { supabase } from '../../lib/supabase';
-import { sendWhatsAppNotification } from '../../lib/notification';
 
-export default function BusinessProfile({ params }) {
-  const resolvedParams = use(params); const slug = resolvedParams?.slug;
-  const [business, setBusiness] = useState(null); const [services, setServices] = useState([]); const [loading, setLoading] = useState(true);
-  const [selectedService, setSelectedService] = useState(null); const [selectedDate, setSelectedDate] = useState('');
-  const [availableSlots, setAvailableSlots] = useState([]); const [selectedTime, setSelectedTime] = useState('');
-  const [customerName, setCustomerName] = useState(''); const [customerPhone, setCustomerPhone] = useState('');
-  const [bookingLoading, setBookingLoading] = useState(false); const [bookingSuccess, setBookingSuccess] = useState(false);
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { getSupabase } from '../../lib/supabase';
+
+export default function OwnerPanel() {
+  const router = useRouter();
+  const [business, setBusiness] = useState(null);
+  const [appointments, setAppointments] = useState([]);
+  const [services, setServices] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [logoutLoading, setLogoutLoading] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
-    if (!slug) return;
+    let active = true;
+    let request = 0;
+    let ownerId = null;
+    let subscription;
+    let refreshTimer;
+
+    function clearData() {
+      setBusiness(null);
+      setAppointments([]);
+      setServices([]);
+    }
+
     async function load() {
-      const { data: p } = await supabase.from('profiles').select('*').eq('slug', slug.toLowerCase().trim()).single();
-      if (!p) return setLoading(false); setBusiness(p);
-      const { data: s } = await supabase.from('services').select('*').eq('profile_id', p.id);
-      if (s) setServices(s); setLoading(false);
-    }
-    load();
-  }, [slug]);
+      const current = ++request;
+      const isCurrent = () => active && current === request;
+      setLoading(true);
+      setError('');
+      clearData();
+      try {
+        const supabase = getSupabase();
+        // Validate identity with Auth; never take the business ID from the URL.
+        const { data: { user }, error: authError } = await supabase.auth.getUser();
+        if (!isCurrent()) return;
+        if (authError || !user) {
+          if (!user && (!authError || authError.name === 'AuthSessionMissingError')) {
+            router.replace('/');
+            return;
+          }
+          throw new Error('לא ניתן לאמת את ההתחברות. נסו שוב או התחברו מחדש.');
+        }
+        ownerId = user.id;
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles').select('id, business_name, slug, address')
+          .eq('id', user.id).maybeSingle();
+        if (!isCurrent()) return;
+        if (profileError) throw new Error('לא ניתן לטעון את פרטי העסק. נסו שוב.');
+        if (!profile) throw new Error('לא נמצא עסק המקושר לחשבון זה. יש לפנות לתמיכה.');
+        if (profile.id !== user.id) throw new Error('אין הרשאה לצפות בעסק זה.');
 
-  useEffect(() => {
-    if (!selectedDate || !business || !selectedService) return;
-    async function getSlots() {
-      const d = new Date(selectedDate); const hours = business.weekly_hours || {};
-      const conf = hours[d.getDay().toString()] || { is_open: true, start: '09:00', end: '17:00' };
-      if (!conf.is_open) { setAvailableSlots([]); return; }
-      const slots = [];
-      for (let h = parseInt(conf.start); h < parseInt(conf.end); h++) {
-        const hStr = h.toString().padStart(2, '0'); slots.push(`${hStr}:00`, `${hStr}:30`);
+        // These filters scope the UI. Supabase RLS must also enforce ownership.
+        const [appointmentResult, serviceResult] = await Promise.all([
+          supabase.from('appointments')
+            .select('profile_id, service_id, customer_name, customer_phone, start_time, end_time')
+            .eq('profile_id', user.id).order('start_time', { ascending: true }),
+          supabase.from('services')
+            .select('id, profile_id, name, duration_minutes, price')
+            .eq('profile_id', user.id).order('name'),
+        ]);
+        if (!isCurrent()) return;
+        if (appointmentResult.error || serviceResult.error) {
+          throw new Error('לא ניתן לטעון את התורים והשירותים. נסו שוב.');
+        }
+        const ownAppointments = appointmentResult.data || [];
+        const ownServices = serviceResult.data || [];
+        if ([...ownAppointments, ...ownServices].some(row => row.profile_id !== user.id)) {
+          throw new Error('אין הרשאה לצפות בנתונים אלה.');
+        }
+        setBusiness(profile);
+        setAppointments(ownAppointments);
+        setServices(ownServices);
+      } catch (err) {
+        if (isCurrent()) setError(err instanceof Error ? err.message : 'אירעה שגיאה בטעינת העסק.');
+      } finally {
+        if (isCurrent()) setLoading(false);
       }
-      const { data: ex } = await supabase.from('appointments').select('start_time').eq('profile_id', business.id).gte('start_time', `${selectedDate}T00:00:00Z`).lte('start_time', `${selectedDate}T23:59:59Z`);
-      const taken = ex?.map(a => new Date(a.start_time).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })) || [];
-      setAvailableSlots(slots.filter(t => !taken.includes(t)));
     }
-    getSlots();
-  }, [selectedDate, business, selectedService]);
 
-  const handleBook = async (e) => {
-    e.preventDefault(); if (!selectedTime || !customerName || !customerPhone) return; setBookingLoading(true);
-    const start = new Date(`${selectedDate}T${selectedTime}:00Z`);
-    const { error } = await supabase.from('appointments').insert([{ profile_id: business.id, service_id: selectedService.id, customer_name: customerName, customer_phone: customerPhone, start_time: start.toISOString(), end_time: new Date(start.getTime() + selectedService.duration_minutes * 60000).toISOString() }]);
-    setBookingLoading(false);
-    if (!error) { setBookingSuccess(true); await sendWhatsAppNotification(customerPhone, `התור נקבע ל-${selectedDate} ב-${selectedTime}! 🎉`); }
-    else if (error.code === '23505') { alert('⚠️ השעה נתפסה.'); setSelectedTime(''); }
-  };
+    try {
+      const supabase = getSupabase();
+      subscription = supabase.auth.onAuthStateChange((event, session) => {
+        if (!active) return;
+        if (event === 'SIGNED_OUT' || (event !== 'INITIAL_SESSION' && !session)) {
+          ++request;
+          ownerId = null;
+          clearData();
+          setLoading(false);
+          router.replace('/');
+        } else if (event === 'SIGNED_IN' && ownerId && session.user.id !== ownerId) {
+          ++request;
+          ownerId = null;
+          clearData();
+          setLoading(true);
+          // Run outside the auth callback to avoid holding the SDK auth lock.
+          refreshTimer = setTimeout(() => { if (active) void load(); }, 0);
+        }
+      }).data.subscription;
+    } catch {
+      // load() reports configuration failures through the normal error state.
+    }
+    void load();
+    return () => {
+      active = false;
+      ++request;
+      clearTimeout(refreshTimer);
+      subscription?.unsubscribe();
+    };
+  }, [router, attempt]);
 
-  if (loading) return <div className="flex h-screen items-center justify-center text-stone-900 bg-neutral-50 font-sans text-sm font-medium">טוען...</div>;
-  if (!business) return <div className="flex h-screen items-center justify-center text-stone-400 font-medium bg-neutral-50">העסק לא נמצא</div>;
+  async function logout() {
+    setLogoutLoading(true);
+    setError('');
+    try {
+      const { error: logoutError } = await getSupabase().auth.signOut();
+      if (logoutError) throw logoutError;
+      setBusiness(null);
+      setAppointments([]);
+      setServices([]);
+      router.replace('/');
+    } catch {
+      setError('ההתנתקות נכשלה. נסו שוב.');
+    } finally {
+      setLogoutLoading(false);
+    }
+  }
 
   return (
-    <div className="min-h-screen bg-neutral-50 py-10 px-4 text-right antialiased font-sans" dir="rtl">
-      <div className="max-w-md mx-auto bg-white rounded-[2.5rem] shadow-2xl overflow-hidden border border-neutral-200/60">
-        <div className="bg-neutral-900 text-white pt-12 pb-8 text-center px-6 relative">
-          <div className="w-16 h-16 bg-stone-800 rounded-2xl mx-auto mb-4 flex items-center justify-center border border-white/10 shadow-lg text-white font-mono text-xl font-bold">{business.business_name.substring(0, 2).toUpperCase()}</div>
-          <h1 className="text-2xl font-bold text-white mb-1.5">{business.business_name}</h1>
-          <p className="text-neutral-400 text-xs">קביעת תור פרימיום מהירה בנייד</p>
-        </div>
-        {business.gallery_urls && business.gallery_urls.length > 0 && (
-          <div className="p-4 border-b bg-white">
-            <div className="grid grid-cols-3 gap-2">{business.gallery_urls.map((url, i) => (<div key={i} className="aspect-square rounded-xl overflow-hidden border bg-neutral-100"><img src={url} alt="גלריה" className="w-full h-full object-cover" /></div>))}</div>
+    <main className="min-h-screen bg-neutral-50 px-4 py-8 text-right text-neutral-900" dir="rtl">
+      <div className="mx-auto max-w-4xl space-y-6">
+        <header className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold">{business?.business_name || 'ניהול העסק'}</h1>
+            <p className="text-sm text-neutral-500">LUMIERA · לוח הבקרה</p>
+          </div>
+          <button type="button" onClick={logout} disabled={logoutLoading} className="rounded-xl bg-neutral-900 px-4 py-2 text-sm text-white disabled:opacity-50">
+            {logoutLoading ? 'מתנתק...' : 'התנתקות'}
+          </button>
+        </header>
+        {error && (
+          <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-rose-800">
+            <p>{error}</p>
+            <button type="button" onClick={() => setAttempt(value => value + 1)} className="mt-2 underline">נסו שוב</button>
+            <Link href="/" className="mr-4 underline">לעמוד ההתחברות</Link>
           </div>
         )}
-        <div className="p-4 bg-neutral-50 border-b border-neutral-100 px-6">
-          <a href={`https://waze.com{encodeURIComponent(business.address || 'תל אביב')}&navigate=yes`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 group"><div className="w-8 h-8 bg-neutral-900 text-white rounded-xl flex items-center justify-center text-xs shadow-md">📍</div><div className="text-xs"><span className="font-bold text-neutral-900 block mb-0.5">מיקום (לחצי לניווט ב-Waze):</span><span className="text-neutral-500 underline decoration-neutral-300">{business.address || 'דיזנגוף 120, תל אביב'}</span></div></a>
-        </div>
-        <div className="p-6">
-          {bookingSuccess ? (
-            <div className="text-center py-8"><div className="w-14 h-14 bg-neutral-900 text-white text-lg rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg">✓</div><h2 className="text-xl font-bold text-neutral-900 mb-1.5">התור נקבע בהצלחה</h2><button onClick={() => { setBookingSuccess(false); setSelectedService(null); }} className="w-full bg-neutral-900 text-white text-xs font-bold py-3.5 rounded-xl">שריון תור חדש</button></div>
-          ) : !selectedService ? (
-            <div className="space-y-3.5"><h2 className="font-bold text-neutral-900 text-sm tracking-wide mb-3">⚡ 1. בחרי טיפול:</h2>
-              {services.map(s => (<div key={s.id} onClick={() => setSelectedService(s)} className="border border-neutral-100 rounded-2xl p-4 flex justify-between items-center cursor-pointer bg-neutral-50/50 hover:bg-white hover:border-neutral-900 hover:shadow-xl transition-all duration-300"><div><h3 className="font-bold text-neutral-900 text-sm">{s.name}</h3><p className="text-neutral-400 text-[11px] mt-0.5">⏱️ {s.duration_minutes} דקות</p></div><span className="font-bold text-neutral-950 text-lg block">₪{s.price}</span></div>))}
+        {loading && <p role="status">טוען את נתוני העסק...</p>}
+        {!loading && business && (
+          <>
+            <div className="flex flex-wrap gap-4 text-sm">
+              <Link href={`/${encodeURIComponent(business.slug)}`} className="underline">לעמוד הזמנת התורים</Link>
+              {business.address && <a href={`https://www.waze.com/ul?q=${encodeURIComponent(business.address)}&navigate=yes`} target="_blank" rel="noopener noreferrer" className="underline">ניווט לעסק</a>}
             </div>
-          ) : (
-            <div><button onClick={() => { setSelectedService(null); setSelectedDate(''); }} className="text-[11px] font-bold text-neutral-500 bg-neutral-100 px-3 py-1.5 rounded-lg mb-5">← חזרה</button>
-              <form onSubmit={handleBook} className="space-y-5">
-                <div><label className="block text-xs font-bold text-neutral-700 mb-1.5">📅 2. בחר תאריך:</label><input type="date" required min={new Date().toISOString().split('T')} value={selectedDate} onChange={(e) => { setSelectedDate(e.target.value); setSelectedTime(''); }} className="w-full border border-neutral-200 rounded-xl p-3 bg-neutral-50/50 text-xs font-bold" /></div>
-                {selectedDate && availableSlots.length === 0 && <p className="text-xs text-rose-500 font-bold text-center py-4 bg-rose-50 rounded-xl">❌ אופס! העסק סגור או שאין שעות פנויות ביום זה.</p>}
-                {selectedDate && availableSlots.length > 0 && (<div><label className="block text-xs font-bold text-neutral-700 mb-2">⏰ 3. בחר שעה:</label><div className="grid grid-cols-4 gap-2">{availableSlots.map(t => <button type="button" key={t} onClick={() => setSelectedTime(t)} className={`p-2.5 text-xs font-bold rounded-xl border text-center transition-all ${selectedTime === t ? 'bg-neutral-900 text-white' : 'bg-white text-slate-700'}`}>{t}</button>)}</div></div>)}
-                {selectedTime && (<div className="space-y-3.5 pt-4 border-t border-neutral-100"><input type="text" required value={customerName} onChange={e => setCustomerName(e.target.value)} className="w-full border border-neutral-200 rounded-xl p-3 text-xs" placeholder="שם מלא" /><input type="tel" required value={customerPhone} onChange={e => setCustomerPhone(e.target.value)} className="w-full border border-neutral-200 rounded-xl p-3 text-xs text-left" dir="ltr" placeholder="מספר נייד" /><button type="submit" disabled={bookingLoading} className="w-full bg-neutral-900 text-white font-bold py-3.5 rounded-xl text-xs">{bookingLoading ? 'משריין...' : '✓ קבע תור'}</button></div>)}
-              </form>
-            </div>
-          )}
-        </div>
+            <section className="rounded-3xl border border-neutral-200 bg-white p-6">
+              <h2 className="mb-4 text-lg font-bold">תורים</h2>
+              {appointments.length === 0 ? <p className="text-sm text-neutral-500">עדיין אין תורים לעסק.</p> : (
+                <ul className="divide-y divide-neutral-100">
+                  {appointments.map((appointment, index) => (
+                    <li key={`${appointment.start_time}-${index}`} className="space-y-1 py-3 text-sm">
+                      <p className="font-bold">{appointment.customer_name}</p>
+                      <p><bdi>{appointment.customer_phone}</bdi></p>
+                      <p>{services.find(service => service.id === appointment.service_id)?.name || 'שירות'}</p>
+                      {/* Match the UTC convention used by the existing booking form. */}
+                      <p>{new Date(appointment.start_time).toLocaleString('he-IL', { timeZone: 'UTC', dateStyle: 'short', timeStyle: 'short' })}</p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+            <section className="rounded-3xl border border-neutral-200 bg-white p-6">
+              <h2 className="mb-4 text-lg font-bold">שירותים</h2>
+              {services.length === 0 ? <p className="text-sm text-neutral-500">עדיין אין שירותים לעסק.</p> : (
+                <ul className="divide-y divide-neutral-100">
+                  {services.map(service => <li key={service.id} className="py-3 text-sm">{service.name} · {service.duration_minutes} דקות · ₪{service.price}</li>)}
+                </ul>
+              )}
+            </section>
+          </>
+        )}
       </div>
-    </div>
+    </main>
   );
 }
